@@ -18,7 +18,7 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             'fetch search results page',
             {
                 retries: {
-                    limit: 1,
+                    limit: 5,
                     delay: '1 second',
                     backoff: "constant",
                 },
@@ -49,11 +49,10 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
 					if (asin) {
 						const url = `https://www.amazon.com/dp/${asin}`;
 						urls.push(url);
-						console.log('found product url: ', url);
+						// console.log('found product url: ', url);
 					}
 				});
-				const urls2 = ['https://www.amazon.com/dp/B0813JNV5Q'];
-
+				const urls2 = ['https://www.amazon.com/dp/B000GISU1M'];
                 return urls2;
             }
         );
@@ -123,34 +122,32 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             // );
         }
     }
-    extractProductData(html: string, product_url: string) {
-        const $ = cheerio.load(html);
 
+
+	extractProductData(html: string, product_url: string) {
+        const $ = cheerio.load(html);
+        
         let price = '';
         let flavour = '';
         let brand = '';
         let images: string[] = [];
         let description = '';
+        let productOverview: Record<string, string> = {};
+        let parentAsin = '';
+        let childAsins: string[] = [];
         
         // Extract price
         const priceElement = $('span.a-price span.a-offscreen').first();
         price = priceElement.length ? priceElement.text().trim() : '';
         
-        // Simplified flavor extraction logic with only working methods
-        
-        // Primary method: Look for the flavor in the variation selection element
+        // Extract flavor
         const variationFlavor = $('#variation_flavor_name .selection');
         if (variationFlavor.length) {
             flavour = variationFlavor.text().trim();
-            // console.log('Found flavor via variation selection:', flavour);
-        }
-
-        // Fallback: Look for flavor in twister text div
-        if (!flavour) {
+        } else {
             const twisterFlavor = $('.twisterTextDiv.text p');
             if (twisterFlavor.length) {
                 flavour = twisterFlavor.text().trim();
-                // console.log('Found flavor via twister text:', flavour);
             }
         }
         
@@ -166,13 +163,54 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
         const descriptionElement = $('div#productDescription');
         description = descriptionElement.length ? descriptionElement.text().trim() : '';
         
+        // Extract productOverview
+        const productOverviewDiv = $('#productOverview_feature_div');
+        if (productOverviewDiv.length) {
+            const table = productOverviewDiv.find('table.a-normal.a-spacing-micro');
+            const rows = table.find('tr');
+            rows.each((index, element) => {
+                const $row = $(element);
+                const label = $row.find('td.a-span3 span.a-text-bold').text().trim();
+                const value = $row.find('td.a-span9 span.po-break-word').text().trim();
+                productOverview[label] = value;
+            });
+        }
+        
+        // Extract parent and child ASINs
+        const scriptTags = $('script[type="text/javascript"]');
+        scriptTags.each((index, script) => {
+            const scriptText = $(script).text();
+            if (scriptText.includes('dimensionToAsinMap') && scriptText.includes('parentAsin')) {
+                // Extract parentAsin
+                const parentAsinMatch = /"parentAsin"\s*:\s*"([^"]*)"/.exec(scriptText);
+                if (parentAsinMatch && parentAsinMatch[1]) {
+                    parentAsin = parentAsinMatch[1];
+                }
+                
+                // Extract dimensionToAsinMap
+                const dimensionToAsinMapMatch = /"dimensionToAsinMap"\s*:\s*{([^}]*)}/.exec(scriptText);
+                if (dimensionToAsinMapMatch && dimensionToAsinMapMatch[1]) {
+                    const dimensionToAsinMapString = `{${dimensionToAsinMapMatch[1]}}`; // Add braces to make it valid JSON
+                    try {
+                        const dimensionToAsinMap = JSON.parse(dimensionToAsinMapString.replace(/'/g, '"'));
+                        childAsins = Object.values(dimensionToAsinMap);
+                    } catch (e) {
+                        console.error('Error parsing dimensionToAsinMap:', e);
+                    }
+                }
+            }
+        });
+        
         return {
             price,
             product_url: product_url,
             flavour,
             brand,
             images,
-            description
+            description,
+            productOverview,
+            parentAsin,
+            childAsins
         };
     }
 }
