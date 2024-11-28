@@ -14,9 +14,9 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
     async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
         // Step 1: Perform search and collect product URLs
         const searchUrls = [
-            'https://www.amazon.com/s?k=protein+powder',
-            'https://www.amazon.com/s?k=protein+powder&page=2',
-            'https://www.amazon.com/s?k=protein+powder&page=3'
+            'https://www.amazon.com/s?k=protein+powder'
+            // 'https://www.amazon.com/s?k=protein+powder&page=2',
+            // 'https://www.amazon.com/s?k=protein+powder&page=3'
         ];
         
         const productUrls: string[] = [];
@@ -65,21 +65,41 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             productUrls.push(...urls);
         }
 
+
         // step 2: extract ASINs from search results
         const finalASINs = await step.do(
             'extract all child and parent ASINs from search results',
             async () => {
+                let asins: Set<string> = new Set();
+                // asin : true if extracted
+                // asin : false if not extracted
 
 
-                return productUrls.map(url => url.split('/dp/')[1].split('/')[0]);
+                // doesnt matter if its a child or parent, we just want all the ASINs
+                // we just care not to duplicate
+                for (const productUrl of productUrls) {
+                    const html = await fetch(productUrl).then(res => res.text());
+                    const asinData = this.extractProductASINs(html, productUrl);
+                    if (asinData.parentAsin) {
+                        asins.add(asinData.parentAsin);
+                    }
+                    asinData.childAsins.forEach(asin => {
+                        if (asin) {
+                            asins.add(asin);
+                        }
+                    });
+                }
+                console.log('top 30 asins: ', Array.from(asins).slice(0, 30));
+                console.log('number of asins: ', asins.size);
+                return Array.from(asins).slice(0, 3);
             }
         );
 
 
-        // Step 3: Fetch each product page and extract information
-		for (const productUrl of productUrls) {
+        // Step 3: Fetch each product page and extract from ASINs 
+		for (const asin of finalASINs) {
             const productData = await step.do(
-                `fetch and parse product page: ${productUrl}`,
+                `fetch and parse product page: ${asin}`,
                 {
                     retries: {
                         limit: 1,
@@ -89,7 +109,7 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                     timeout: '30 seconds',
                 },
                 async () => {
-                    const resp = await fetch(productUrl, {
+                    const resp = await fetch(`https://www.amazon.com/dp/${asin}`, {
                         headers: {
                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -106,14 +126,14 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                     }
 
                     const html = await resp.text();
-                    const productData = this.extractProductData(html, productUrl);
+                    const productData = this.extractProductData(html, `https://www.amazon.com/dp/${asin}`);
 					console.log('extracted product data: ', productData);
+                    // mark as extracted
                     return productData;
                 }
             );
         }
     }
-
     extractProductASINs(html: string, product_url: string) {
         const $ = cheerio.load(html);
 
@@ -145,21 +165,21 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             }
         });
 
-
-
-
+        return {
+            parentAsin,
+            childAsins: asins,
+        }
 
     }
-        
 
 	extractProductData(html: string, product_url: string) {
         const $ = cheerio.load(html);
         
         let price = '';
         let flavour = '';
-        let brand = '';
+        // let brand = '';
         let images: string[] = [];
-        let description = '';
+        // let description = '';
         let productOverview: Record<string, string> = {};
         // let parentAsin = '';
         // let childAsins: string[] = [];
@@ -180,16 +200,16 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
         }
         
         // Extract brand
-        const brandElement = $('a.a-link-normal.a-text-normal');
-        brand = brandElement.length ? brandElement.text().trim() : '';
+        // const brandElement = $('a.a-link-normal.a-text-normal');
+        // brand = brandElement.length ? brandElement.text().trim() : '';
         
         // Extract images from carousel
         const imageElements = $('div#imageBlock img');
         images = imageElements.map((i, el) => $(el).attr('src') || '').get();
         
-        // Extract product description
-        const descriptionElement = $('div#productDescription');
-        description = descriptionElement.length ? descriptionElement.text().trim() : '';
+        // // Extract product description
+        // const descriptionElement = $('div#productDescription');
+        // description = descriptionElement.length ? descriptionElement.text().trim() : '';
         
         // Extract productOverview
         const productOverviewDiv = $('#productOverview_feature_div');
@@ -204,18 +224,15 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             });
         }
         
-      
-        
         return {
             price,
             product_url: product_url,
             flavour,
-            brand,
             images,
-            description,
             productOverview,
         };
     }
+   
 }
 
 export default {
