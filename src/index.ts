@@ -12,53 +12,71 @@ type Params = {
 
 export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
     async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
-        // Step 1: Perform search and collect product URLs\
-        const searchUrl = 'https://www.amazon.com/s?k=protein+powder';
-        const productUrls = await step.do(
-            'fetch search results page',
-            {
-                retries: {
-                    limit: 5,
-                    delay: '1 second',
-                    backoff: "constant",
+        // Step 1: Perform search and collect product URLs
+        const searchUrls = [
+            'https://www.amazon.com/s?k=protein+powder',
+            'https://www.amazon.com/s?k=protein+powder&page=2',
+            'https://www.amazon.com/s?k=protein+powder&page=3'
+        ];
+        
+        const productUrls: string[] = [];
+
+        for (const searchUrl of searchUrls) {
+            const urls = await step.do(
+                `fetch search results page: ${searchUrl}`,
+                {
+                    retries: {
+                        limit: 5,
+                        delay: '1 second',
+                        backoff: "constant",
+                    },
+                    timeout: '30 seconds',
                 },
-                timeout: '30 seconds',
-            },
-            async () => {
-                const resp = await fetch(searchUrl, {
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                        'Accept-Language': 'en-US,en;q=0.5',
-                        'Accept-Encoding': 'gzip, deflate, br',
-                        'DNT': '1',
-                        'Connection': 'keep-alive',
-                        'Upgrade-Insecure-Requests': '1'
+                async () => {
+                    const resp = await fetch(searchUrl, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.5',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'DNT': '1',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1'
+                        }
+                    });
+
+                    if (!resp.ok) {
+                        throw new Error(`Failed to fetch search page: ${resp.status} ${resp.statusText}`);
                     }
-                });
 
-                if (!resp.ok) {
-                    throw new Error(`Failed to fetch search page: ${resp.status} ${resp.statusText}`);
+                    const html = await resp.text();
+                    const $ = cheerio.load(html);
+                    const urls: string[] = [];
+                    $('div[data-asin]').each((index: number, element: any) => {
+                        const asin = $(element).data('asin');
+                        if (asin) {
+                            const url = `https://www.amazon.com/dp/${asin}`;
+                            urls.push(url);
+                        }
+                    });
+                    return urls;
                 }
+            );
+            productUrls.push(...urls);
+        }
 
-                const html = await resp.text();
-				const $ = cheerio.load(html);
-				const urls: string[] = [];
-				$('div[data-asin]').each((index: number, element: any) => {
-					const asin = $(element).data('asin');
-					if (asin) {
-						const url = `https://www.amazon.com/dp/${asin}`;
-						urls.push(url);
-						// console.log('found product url: ', url);
-					}
-				});
-				const urls2 = ['https://www.amazon.com/dp/B000GISU1M'];
-                return urls2;
+        // step 2: extract ASINs from search results
+        const finalASINs = await step.do(
+            'extract all child and parent ASINs from search results',
+            async () => {
+
+
+                return productUrls.map(url => url.split('/dp/')[1].split('/')[0]);
             }
         );
 
 
-        // Step 2: Fetch each product page and extract information
+        // Step 3: Fetch each product page and extract information
 		for (const productUrl of productUrls) {
             const productData = await step.do(
                 `fetch and parse product page: ${productUrl}`,
@@ -93,36 +111,46 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                     return productData;
                 }
             );
-
-            // Step 3: Insert data into D1 database
-            // await step.do(
-            //     'insert product data into database',
-            //     {
-            //         retries: {
-            //             limit: 1,
-            //             delay: '1 second',
-            //             backoff: "constant",
-            //         },
-            //         timeout: '30 seconds',
-            //     },
-            //     async () => {
-            //         const insertStmt = this.env.D1_DEMO.prepare(`
-            //             INSERT INTO Protein (price, product_url, flavour, brand, images, description)
-            //             VALUES (?, ?, ?, ?, ?, ?)
-            //         `);
-            //         await insertStmt.run([
-            //             productData.price,
-            //             productData.product_url,
-            //             productData.flavour,
-            //             productData.brand,
-            //             productData.images.join(','), // Store as comma-separated string
-            //             productData.description
-            //         ]);
-            //     }
-            // );
         }
     }
 
+    extractProductASINs(html: string, product_url: string) {
+        const $ = cheerio.load(html);
+
+        let asins: string[] = [];
+        let parentAsin = '';
+
+        // Extract parent and child ASINs
+        const scriptTags = $('script[type="text/javascript"]');
+        scriptTags.each((index, script) => {
+            const scriptText = $(script).text();
+            if (scriptText.includes('dimensionToAsinMap') && scriptText.includes('parentAsin')) {
+                // Extract parentAsin
+                const parentAsinMatch = /"parentAsin"\s*:\s*"([^"]*)"/.exec(scriptText);
+                if (parentAsinMatch && parentAsinMatch[1]) {
+                    parentAsin = parentAsinMatch[1];
+                }
+                
+                // Extract dimensionToAsinMap
+                const dimensionToAsinMapMatch = /"dimensionToAsinMap"\s*:\s*{([^}]*)}/.exec(scriptText);
+                if (dimensionToAsinMapMatch && dimensionToAsinMapMatch[1]) {
+                    const dimensionToAsinMapString = `{${dimensionToAsinMapMatch[1]}}`; // Add braces to make it valid JSON
+                    try {
+                        const dimensionToAsinMap = JSON.parse(dimensionToAsinMapString.replace(/'/g, '"'));
+                        asins = Object.values(dimensionToAsinMap);
+                    } catch (e) {
+                        console.error('Error parsing dimensionToAsinMap:', e);
+                    }
+                }
+            }
+        });
+
+
+
+
+
+    }
+        
 
 	extractProductData(html: string, product_url: string) {
         const $ = cheerio.load(html);
@@ -133,8 +161,8 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
         let images: string[] = [];
         let description = '';
         let productOverview: Record<string, string> = {};
-        let parentAsin = '';
-        let childAsins: string[] = [];
+        // let parentAsin = '';
+        // let childAsins: string[] = [];
         
         // Extract price
         const priceElement = $('span.a-price span.a-offscreen').first();
@@ -176,30 +204,7 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             });
         }
         
-        // Extract parent and child ASINs
-        const scriptTags = $('script[type="text/javascript"]');
-        scriptTags.each((index, script) => {
-            const scriptText = $(script).text();
-            if (scriptText.includes('dimensionToAsinMap') && scriptText.includes('parentAsin')) {
-                // Extract parentAsin
-                const parentAsinMatch = /"parentAsin"\s*:\s*"([^"]*)"/.exec(scriptText);
-                if (parentAsinMatch && parentAsinMatch[1]) {
-                    parentAsin = parentAsinMatch[1];
-                }
-                
-                // Extract dimensionToAsinMap
-                const dimensionToAsinMapMatch = /"dimensionToAsinMap"\s*:\s*{([^}]*)}/.exec(scriptText);
-                if (dimensionToAsinMapMatch && dimensionToAsinMapMatch[1]) {
-                    const dimensionToAsinMapString = `{${dimensionToAsinMapMatch[1]}}`; // Add braces to make it valid JSON
-                    try {
-                        const dimensionToAsinMap = JSON.parse(dimensionToAsinMapString.replace(/'/g, '"'));
-                        childAsins = Object.values(dimensionToAsinMap);
-                    } catch (e) {
-                        console.error('Error parsing dimensionToAsinMap:', e);
-                    }
-                }
-            }
-        });
+      
         
         return {
             price,
@@ -209,8 +214,6 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             images,
             description,
             productOverview,
-            parentAsin,
-            childAsins
         };
     }
 }
