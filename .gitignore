@@ -173,3 +173,4 @@ dist
 
 # macOS
 .DS_Store
+wrangler.toml
