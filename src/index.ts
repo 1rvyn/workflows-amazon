@@ -15,33 +15,20 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
         // Step 1: Perform search and collect product URLs
         const searchUrls = [
             'https://www.amazon.com/s?k=protein+powder'
-            // 'https://www.amazon.com/s?k=protein+powder&page=2',
-            // 'https://www.amazon.com/s?k=protein+powder&page=3'
+            // Add more search URLs if needed
         ];
-        
-        const productUrls: string[] = [];
 
-        for (const searchUrl of searchUrls) {
-            const urls = await step.do(
-                `fetch search results page: ${searchUrl}`,
-                {
-                    retries: {
-                        limit: 5,
-                        delay: '1 second',
-                        backoff: "constant",
-                    },
+        const productUrlsList = await Promise.all(
+            searchUrls.map(searchUrl =>
+                step.do(`fetch search results page: ${searchUrl}`, {
+                    retries: { limit: 5, delay: '1 second', backoff: "constant" },
                     timeout: '30 seconds',
-                },
-                async () => {
+                }, async () => {
                     const resp = await fetch(searchUrl, {
                         headers: {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                            'Accept-Language': 'en-US,en;q=0.5',
-                            'Accept-Encoding': 'gzip, deflate, br',
-                            'DNT': '1',
-                            'Connection': 'keep-alive',
-                            'Upgrade-Insecure-Requests': '1'
+                            'User-Agent': 'Mozilla/5.0...',
+                            'Accept': 'text/html,application/xhtml+xml...',
+                            // Other headers
                         }
                     });
 
@@ -52,72 +39,55 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                     const html = await resp.text();
                     const $ = cheerio.load(html);
                     const urls: string[] = [];
-                    $('div[data-asin]').each((index: number, element: any) => {
+                    $('div[data-asin]').each((_, element) => {
                         const asin = $(element).data('asin');
                         if (asin) {
-                            const url = `https://www.amazon.com/dp/${asin}`;
-                            urls.push(url);
+                            urls.push(`https://www.amazon.com/dp/${asin}`);
                         }
                     });
                     return urls;
-                }
-            );
-            productUrls.push(...urls);
-        }
+                })
+            )
+        );
 
+        // Flatten the list of product URLs
+        const productUrls = productUrlsList.flat();
 
-        // step 2: extract ASINs from search results
+        // Step 2: Extract ASINs from product URLs
         const finalASINs = await step.do(
             'extract all child and parent ASINs from search results',
             async () => {
-                let asins: Set<string> = new Set();
-                // asin : true if extracted
-                // asin : false if not extracted
+                const asinsList = await Promise.all(
+                    productUrls.map(productUrl =>
+                        step.do(`extract ASINs from ${productUrl}`, async () => {
+                            const html = await fetch(productUrl).then(res => res.text());
+                            const asinData = this.extractProductASINs(html, productUrl);
+                            const asins = [asinData.parentAsin, ...asinData.childAsins];
+                            return asins.filter(Boolean);
+                        })
+                    )
+                );
 
-
-                // doesnt matter if its a child or parent, we just want all the ASINs
-                // we just care not to duplicate
-                for (const productUrl of productUrls) {
-                    const html = await fetch(productUrl).then(res => res.text());
-                    const asinData = this.extractProductASINs(html, productUrl);
-                    if (asinData.parentAsin) {
-                        asins.add(asinData.parentAsin);
-                    }
-                    asinData.childAsins.forEach(asin => {
-                        if (asin) {
-                            asins.add(asin);
-                        }
-                    });
-                }
-                console.log('top 30 asins: ', Array.from(asins).slice(0, 30));
-                console.log('number of asins: ', asins.size);
-                return Array.from(asins).slice(0, 3);
+                // Flatten and deduplicate ASINs
+                const allAsins = Array.from(new Set(asinsList.flat()));
+                console.log('top 30 asins: ', allAsins.slice(0, 30));
+                console.log('number of asins: ', allAsins.length);
+                return allAsins.slice(0, 3); // Adjust as needed
             }
         );
 
-
-        // Step 3: Fetch each product page and extract from ASINs 
-		for (const asin of finalASINs) {
-            const productData = await step.do(
-                `fetch and parse product page: ${asin}`,
-                {
-                    retries: {
-                        limit: 1,
-                        delay: '1 second',
-                        backoff: "constant",
-                    },
+        // Step 3: Fetch each product page and extract data
+        const productDataList = await Promise.all(
+            finalASINs.map(asin =>
+                step.do(`fetch and parse product page: ${asin}`, {
+                    retries: { limit: 1, delay: '1 second', backoff: "constant" },
                     timeout: '30 seconds',
-                },
-                async () => {
+                }, async () => {
                     const resp = await fetch(`https://www.amazon.com/dp/${asin}`, {
                         headers: {
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                            'Accept-Language': 'en-US,en;q=0.5',
-                            'Accept-Encoding': 'gzip, deflate, br',
-                            'DNT': '1',
-                            'Connection': 'keep-alive',
-                            'Upgrade-Insecure-Requests': '1'
+                            'User-Agent': 'Mozilla/5.0...',
+                            'Accept': 'text/html,application/xhtml+xml...',
+                            // Other headers
                         }
                     });
 
@@ -126,14 +96,46 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                     }
 
                     const html = await resp.text();
-                    const productData = this.extractProductData(html, `https://www.amazon.com/dp/${asin}`);
-					console.log('extracted product data: ', productData);
-                    // mark as extracted
-                    return productData;
-                }
-            );
+                    return this.extractProductData(html, `https://www.amazon.com/dp/${asin}`);
+                })
+            )
+        );
+
+        // Step 4: Insert product data into D1 database in chunks
+        const chunkSize = 10;
+        const insertChunks = [];
+
+        for (let i = 0; i < productDataList.length; i += chunkSize) {
+            const chunk = productDataList.slice(i, i + chunkSize);
+            insertChunks.push(chunk);
         }
+
+        await Promise.all(
+            insertChunks.map((chunk, index) =>
+                step.do(`insert product data into D1: chunk ${index + 1}`, async () => {
+                    const statements = chunk.map(product =>
+                        this.env.D1_DEMO.prepare(
+                            `INSERT OR REPLACE INTO products (asin, price, product_url, flavour, images, productOverview) 
+                             VALUES (?, ?, ?, ?, ?, ?)`
+                        ).bind(
+                            product.asin,
+                            product.price,
+                            product.product_url,
+                            product.flavour,
+                            JSON.stringify(product.images),
+                            JSON.stringify(product.productOverview)
+                        )
+                    );
+
+                    // Execute all prepared statements sequentially
+                    for (const stmt of statements) {
+                        await stmt.run();
+                    }
+                })
+            )
+        );
     }
+
     extractProductASINs(html: string, product_url: string) {
         const $ = cheerio.load(html);
 
@@ -142,7 +144,7 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
 
         // Extract parent and child ASINs
         const scriptTags = $('script[type="text/javascript"]');
-        scriptTags.each((index, script) => {
+        scriptTags.each((_, script) => {
             const scriptText = $(script).text();
             if (scriptText.includes('dimensionToAsinMap') && scriptText.includes('parentAsin')) {
                 // Extract parentAsin
@@ -150,7 +152,7 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                 if (parentAsinMatch && parentAsinMatch[1]) {
                     parentAsin = parentAsinMatch[1];
                 }
-                
+
                 // Extract dimensionToAsinMap
                 const dimensionToAsinMapMatch = /"dimensionToAsinMap"\s*:\s*{([^}]*)}/.exec(scriptText);
                 if (dimensionToAsinMapMatch && dimensionToAsinMapMatch[1]) {
@@ -169,25 +171,20 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             parentAsin,
             childAsins: asins,
         }
-
     }
 
-	extractProductData(html: string, product_url: string) {
+    extractProductData(html: string, product_url: string) {
         const $ = cheerio.load(html);
-        
+
         let price = '';
         let flavour = '';
-        // let brand = '';
         let images: string[] = [];
-        // let description = '';
         let productOverview: Record<string, string> = {};
-        // let parentAsin = '';
-        // let childAsins: string[] = [];
-        
+
         // Extract price
         const priceElement = $('span.a-price span.a-offscreen').first();
         price = priceElement.length ? priceElement.text().trim() : '';
-        
+
         // Extract flavor
         const variationFlavor = $('#variation_flavor_name .selection');
         if (variationFlavor.length) {
@@ -198,41 +195,38 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                 flavour = twisterFlavor.text().trim();
             }
         }
-        
-        // Extract brand
-        // const brandElement = $('a.a-link-normal.a-text-normal');
-        // brand = brandElement.length ? brandElement.text().trim() : '';
-        
+
         // Extract images from carousel
         const imageElements = $('div#imageBlock img');
         images = imageElements.map((i, el) => $(el).attr('src') || '').get();
-        
-        // // Extract product description
-        // const descriptionElement = $('div#productDescription');
-        // description = descriptionElement.length ? descriptionElement.text().trim() : '';
-        
+
         // Extract productOverview
         const productOverviewDiv = $('#productOverview_feature_div');
         if (productOverviewDiv.length) {
             const table = productOverviewDiv.find('table.a-normal.a-spacing-micro');
             const rows = table.find('tr');
-            rows.each((index, element) => {
+            rows.each((_, element) => {
                 const $row = $(element);
                 const label = $row.find('td.a-span3 span.a-text-bold').text().trim();
                 const value = $row.find('td.a-span9 span.po-break-word').text().trim();
                 productOverview[label] = value;
             });
         }
-        
+
         return {
+            asin: this.extractASINFromURL(product_url),
             price,
-            product_url: product_url,
+            product_url,
             flavour,
             images,
             productOverview,
         };
     }
-   
+
+    extractASINFromURL(url: string): string {
+        const match = url.match(/\/dp\/([A-Z0-9]{10})/);
+        return match ? match[1] : '';
+    }
 }
 
 export default {
