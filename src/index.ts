@@ -15,9 +15,8 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
         // Step 1: Perform search and collect product URLs
         const searchUrls = [
             'https://www.amazon.com/s?k=protein+powder',
-            // You can add more pages once stable
-            // 'https://www.amazon.com/s?k=protein+powder&page=2',
-            // 'https://www.amazon.com/s?k=protein+powder&page=3'
+            'https://www.amazon.com/s?k=protein+powder&page=2',
+            'https://www.amazon.com/s?k=protein+powder&page=3'
         ];
 
         // Fetch search result pages and extract product URLs (Step 1)
@@ -30,8 +29,6 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                 // Random delay to reduce suspicion
                 const randomDelay = Math.random() * 3000; 
                 await new Promise(resolve => setTimeout(resolve, randomDelay));
-
-
                 const resp = await fetch(searchUrl, {
                     headers: {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
@@ -71,10 +68,10 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
 
         // Step 2: Extract ASINs (both parent and child) and store them in D1
         await step.do('extract and store ASINs', {
-            retries: { limit: 5, delay: '5 seconds', backoff: "linear" },
+            retries: { limit: 10, delay: '10 seconds', backoff: "linear" },
             timeout: '60 seconds',
         }, async () => {
-            for (const productUrl of productUrls.slice(0, 3)) {
+            for (const productUrl of productUrls) {
                 try {
                     const resp = await fetch(productUrl, { headers: {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
@@ -117,13 +114,17 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                             const dimensionMatch = /"dimensionToAsinMap"\s*:\s*({[^}]*})/.exec(scriptText);
                             if (dimensionMatch && dimensionMatch[1]) {
                                 try {
-                                    // Ensure valid JSON by replacing single quotes if needed.
+                                    // Ensure valid JSON by replacing single quotes if needed
                                     const dimensionJSON = dimensionMatch[1].replace(/'/g, '"');
-                                    const dimensionObj = JSON.parse(dimensionJSON);
-                                    // dimensionObj should map keys to ASIN strings
-                                    childAsins = Object.values(dimensionObj);
+                                    try {
+                                        const dimensionObj = JSON.parse(dimensionJSON);
+                                        // dimensionObj should map keys to ASIN strings
+                                        childAsins = Object.values(dimensionObj);
+                                    } catch (e) {
+                                        console.error('JSON parse error:', e);
+                                    }
                                 } catch (e) {
-                                    console.error('Error parsing dimensionToAsinMap:', e);
+                                    console.error('Error preparing JSON string:', e);
                                 }
                             }
                         }
@@ -156,8 +157,17 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
 
         // Step 3: Retrieve all ASINs from D1
         const finalASINs = await step.do('retrieve ASINs from D1', async () => {
-            const { results } = await this.env.DB.prepare('SELECT asin FROM products').all();
-            return results.map(row => row.asin as string);
+            try {
+                const { results } = await this.env.DB.prepare('SELECT asin FROM products').all();
+                if (!results) {
+                    console.error('No results returned from DB query');
+                    return [];
+                }
+                return results.map(row => row.asin as string);
+            } catch (err) {
+                console.error('Error retrieving ASINs:', err);
+                return [];
+            }
         });
 
         // Step 4: Fetch product data and update D1
@@ -204,42 +214,6 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                 }
             }
         });
-    }
-
-    extractProductASINs(html: string) {
-        const $ = cheerio.load(html);
-
-        let parentAsin = '';
-        let asins: string[] = [];
-
-        const scriptTags = $('script[type="text/javascript"]');
-        scriptTags.each((_, script) => {
-            const scriptText = $(script).text();
-            if (scriptText.includes('dimensionToAsinMap') && scriptText.includes('parentAsin')) {
-                // Extract parentAsin
-                const parentAsinMatch = /"parentAsin"\s*:\s*"([^"]*)"/.exec(scriptText);
-                if (parentAsinMatch && parentAsinMatch[1]) {
-                    parentAsin = parentAsinMatch[1];
-                }
-
-                // Extract dimensionToAsinMap
-                const dimensionToAsinMapMatch = /"dimensionToAsinMap"\s*:\s*{([^}]*)}/.exec(scriptText);
-                if (dimensionToAsinMapMatch && dimensionToAsinMapMatch[1]) {
-                    const dimensionToAsinMapString = `{${dimensionToAsinMapMatch[1]}}`; 
-                    try {
-                        const dimensionToAsinMap = JSON.parse(dimensionToAsinMapString.replace(/'/g, '"'));
-                        asins = Object.values(dimensionToAsinMap);
-                    } catch (e) {
-                        console.error('Error parsing dimensionToAsinMap:', e);
-                    }
-                }
-            }
-        });
-
-        return {
-            parentAsin,
-            childAsins: asins,
-        };
     }
 
     extractProductData(html: string, product_url: string) {
