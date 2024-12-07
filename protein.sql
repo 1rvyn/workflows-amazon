@@ -1,3 +1,6 @@
+DROP TABLE IF EXISTS products;
+DROP TABLE IF EXISTS images;
+
 CREATE TABLE products (
     asin VARCHAR(20) PRIMARY KEY,
     price VARCHAR(20),
@@ -6,7 +9,8 @@ CREATE TABLE products (
     servings_per_container VARCHAR(50),
     item_weight VARCHAR(50),
     material_type_free VARCHAR(100),
-    brand VARCHAR(100)
+    brand VARCHAR(100),
+    product_details TEXT
 );
 
 CREATE TABLE images (
