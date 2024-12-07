@@ -1,10 +1,9 @@
 import { WorkflowEntrypoint, WorkflowStep, WorkflowEvent } from 'cloudflare:workers';
 import * as cheerio from 'cheerio'; // Ensure cheerio is installed
-import pLimit from 'p-limit';
 
 type Env = {
     MY_WORKFLOW: Workflow;
-    D1_DEMO: D1Database;
+    DB: D1Database;
 };
 
 type Params = {
@@ -21,14 +20,6 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             // 'https://www.amazon.com/s?k=protein+powder&page=3'
         ];
 
-        const userAgents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        ];
-
         // Fetch search result pages and extract product URLs (Step 1)
         const productUrls: string[] = [];
         for (const searchUrl of searchUrls) {
@@ -40,11 +31,10 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                 const randomDelay = Math.random() * 3000; 
                 await new Promise(resolve => setTimeout(resolve, randomDelay));
 
-                const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
 
                 const resp = await fetch(searchUrl, {
                     headers: {
-                        'User-Agent': randomUserAgent,
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
                         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                         'Accept-Language': 'en-US,en;q=0.9',
                         'Connection': 'keep-alive',
@@ -79,120 +69,141 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
             productUrls.push(...urls);
         }
 
-        // Step 2: Extract ASINs (both parent and child) directly in one step
-        const finalASINs = await step.do('extract all ASINs from product URLs', {
+        // Step 2: Extract ASINs (both parent and child) and store them in D1
+        await step.do('extract and store ASINs', {
             retries: { limit: 5, delay: '5 seconds', backoff: "linear" },
             timeout: '60 seconds',
         }, async () => {
-            const limit = pLimit(2); // limit concurrency to 2
-            const asinsSet = new Set<string>();
-
-            // Process product URLs with concurrency limit
-            await Promise.all(productUrls.map(productUrl =>
-                limit(async () => {
-                    try {
-                        const resp = await fetch(productUrl);
-                        if (!resp.ok) {
-                            console.error(`Failed to fetch product URL: ${productUrl} - ${resp.status} ${resp.statusText}`);
-                            return;
-                        }
-
-                        const html = await resp.text();
-                        const { parentAsin, childAsins } = this.extractProductASINs(html);
-
-                        // Clean and add parent ASIN
-                        if (parentAsin) {
-                            const cleanedParentAsin = parentAsin.includes('-') ? parentAsin.split('-')[0] : parentAsin;
-                            if (cleanedParentAsin) { // Further check to ensure cleaned ASIN is valid
-                                asinsSet.add(cleanedParentAsin);
-                            } else {
-                                console.error(`Invalid parent ASIN after cleaning: ${parentAsin}`);
+            for (const productUrl of productUrls.slice(0, 3)) {
+                try {
+                    const resp = await fetch(productUrl, { headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Cache-Control': 'max-age=0',
+                        'sec-ch-ua': '"Chromium";v="123", "Not:A-Brand";v="99"',
+                        'sec-ch-ua-mobile': '?0',
+                        'sec-ch-ua-platform': '"Windows"',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                    } });
+                    if (!resp.ok) {
+                        console.error(`Failed to fetch product URL: ${productUrl}`);
+                        continue;
+                    }
+            
+                    const html = await resp.text();
+                    const $ = cheerio.load(html);
+            
+                    // Extract parent and child ASINs inline
+                    let parentAsin = '';
+                    let childAsins: string[] = [];
+            
+                    $('script[type="text/javascript"]').each((_, scriptEl) => {
+                        const scriptText = $(scriptEl).text();
+            
+                        if (scriptText.includes('dimensionToAsinMap') && scriptText.includes('parentAsin')) {
+                            // Extract parentAsin
+                            const parentMatch = /"parentAsin"\s*:\s*"([^"]*)"/.exec(scriptText);
+                            if (parentMatch && parentMatch[1]) {
+                                parentAsin = parentMatch[1];
                             }
-                        }
-
-                        // Clean and add child ASINs
-                        for (const asin of childAsins) {
-                            if (asin) {
-                                const cleanedAsin = asin.includes('-') ? asin.split('-')[0] : asin;
-                                if (cleanedAsin) { // Further check to ensure cleaned ASIN is valid
-                                    asinsSet.add(cleanedAsin);
-                                } else {
-                                    console.error(`Invalid child ASIN after cleaning: ${asin}`);
+            
+                            // Extract dimensionToAsinMap JSON
+                            const dimensionMatch = /"dimensionToAsinMap"\s*:\s*({[^}]*})/.exec(scriptText);
+                            if (dimensionMatch && dimensionMatch[1]) {
+                                try {
+                                    // Ensure valid JSON by replacing single quotes if needed.
+                                    const dimensionJSON = dimensionMatch[1].replace(/'/g, '"');
+                                    const dimensionObj = JSON.parse(dimensionJSON);
+                                    // dimensionObj should map keys to ASIN strings
+                                    childAsins = Object.values(dimensionObj);
+                                } catch (e) {
+                                    console.error('Error parsing dimensionToAsinMap:', e);
                                 }
                             }
                         }
-                    } catch (error) {
-                        console.error(`Error processing ${productUrl}:`, error);
+                    });
+            
+                    // Insert parentAsin
+                    if (parentAsin) {
+                        const cleanedParent = parentAsin.includes('-') ? parentAsin.split('-')[0] : parentAsin;
+                        if (cleanedParent) {
+                            await this.env.DB.prepare(`INSERT OR IGNORE INTO products (asin) VALUES (?)`)
+                                .bind(cleanedParent)
+                                .run();
+                        }
                     }
-                })
-            ));
-
-            return Array.from(asinsSet);
+            
+                    // Insert childAsins
+                    for (const asin of childAsins) {
+                        const cleanedAsin = asin.includes('-') ? asin.split('-')[0] : asin;
+                        if (cleanedAsin) {
+                            await this.env.DB.prepare(`INSERT OR IGNORE INTO products (asin) VALUES (?)`)
+                                .bind(cleanedAsin)
+                                .run();
+                        }
+                    }
+                } catch (error) {
+                    console.error(`Error processing ${productUrl}:`, error);
+                }
+            }
         });
 
-        // Step 3: Fetch product data with concurrency limit
-        const productDataList = await step.do('fetch product data for all ASINs', {
+        // Step 3: Retrieve all ASINs from D1
+        const finalASINs = await step.do('retrieve ASINs from D1', async () => {
+            const { results } = await this.env.DB.prepare('SELECT asin FROM products').all();
+            return results.map(row => row.asin as string);
+        });
+
+        // Step 4: Fetch product data and update D1
+        await step.do('fetch and update product data for all ASINs', {
             retries: { limit: 5, delay: '5 seconds', backoff: "linear" },
             timeout: '120 seconds',
         }, async () => {
-            const limit = pLimit(2);
-            const results = await Promise.all(
-                finalASINs.map(asin =>
-                    limit(async () => {
-                        const productUrl = `https://www.amazon.com/dp/${asin}`;
-                        try {
-                            const resp = await fetch(productUrl, {
-                                headers: {
-                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
-                                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                                    'Accept-Language': 'en-US,en;q=0.9',
-                                    'Accept-Encoding': 'gzip, deflate, br',
-                                    'Connection': 'keep-alive',
-                                    'Upgrade-Insecure-Requests': '1',
-                                    'Cache-Control': 'max-age=0',
-                                }
-                            });
-
-                            if (!resp.ok) {
-                                console.error(`Failed to fetch product page for ASIN ${asin}: ${resp.status} ${resp.statusText}`);
-                                return null;
-                            }
-
-                            const html = await resp.text();
-                            return this.extractProductData(html, productUrl);
-                        } catch (error) {
-                            console.error(`Error fetching product data for ASIN ${asin}:`, error);
-                            return null;
+            for (const asin of finalASINs) {
+                const productUrl = `https://www.amazon.com/dp/${asin}`;
+                try {
+                    const resp = await fetch(productUrl, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                            'Accept-Language': 'en-US,en;q=0.9',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                            'Cache-Control': 'max-age=0',
                         }
-                    })
-                )
-            );
+                    });
 
-            // Filter out null results
-            return results.filter(Boolean);
+                    if (!resp.ok) {
+                        console.error(`Failed to fetch product page for ASIN ${asin}: ${resp.status} ${resp.statusText}`);
+                        continue;
+                    }
+
+                    const html = await resp.text();
+                    const productData = this.extractProductData(html, productUrl);
+
+                    if (productData) {
+                        await this.env.DB.prepare(
+                            `UPDATE products SET price = ?, product_url = ?, flavour = ?, product_details = ? WHERE asin = ?`
+                        ).bind(
+                            productData.price,
+                            productData.product_url + '?tag=ineedprotei0e-20',
+                            productData.flavour,
+                            JSON.stringify({ images: productData.images, productOverview: productData.productOverview }),
+                            productData.asin
+                        ).run();
+                    }
+                } catch (error) {
+                    console.error(`Error fetching or updating product data for ASIN ${asin}:`, error);
+                }
+            }
         });
-
-        // Step 4: Insert product data into D1 database in chunks
-        const chunkSize = 10;
-        for (let i = 0; i < productDataList.length; i += chunkSize) {
-            const chunk = productDataList.slice(i, i + chunkSize);
-            await step.do(`insert product data into D1: chunk ${Math.floor(i/chunkSize) + 1}`, async () => {
-                for (const product of chunk) {
-                    if (product) {
-                    await this.env.D1_DEMO.prepare(
-                        `INSERT OR REPLACE INTO products (asin, price, product_url, flavour, product_details) 
-                         VALUES (?, ?, ?, ?, ?)`
-                    ).bind(
-                        product.asin,
-                        product.price,
-                        product.product_url + '?tag=ineedprotei0e-20',
-                        product.flavour,
-                        JSON.stringify({ images: product.images, productOverview: product.productOverview })
-                    ).run();
-                }
-                }
-            });
-        }
     }
 
     extractProductASINs(html: string) {
