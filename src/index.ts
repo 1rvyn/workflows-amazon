@@ -14,45 +14,84 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
     async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
         // Step 1: Perform search and collect product URLs
         const searchUrls = [
-            'https://www.amazon.com/s?k=protein+powder'
-            // Add more search URLs if needed
+            'https://www.amazon.com/s?k=protein+powder',
+            // 'https://www.amazon.com/s?k=protein+powder&page=2',
+            // 'https://www.amazon.com/s?k=protein+powder&page=3'
+        ];
+
+        const userAgents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
         ];
 
         const productUrlsList = await Promise.all(
             searchUrls.map(searchUrl =>
                 step.do(`fetch search results page: ${searchUrl}`, {
-                    retries: { limit: 5, delay: '1 second', backoff: "constant" },
+                    retries: { limit: 5, delay: '2 second', backoff: "constant" },
                     timeout: '30 seconds',
                 }, async () => {
-                    const resp = await fetch(searchUrl, {
-                        headers: {
-                            'User-Agent': 'Mozilla/5.0...',
-                            'Accept': 'text/html,application/xhtml+xml...',
-                            // Other headers
-                        }
-                    });
+                    const randomDelay = Math.random() * 3000; // Random delay between 0 and 3 seconds
+                    await new Promise(resolve => setTimeout(resolve, randomDelay));
 
-                    if (!resp.ok) {
-                        throw new Error(`Failed to fetch search page: ${resp.status} ${resp.statusText}`);
+                    const randomUserAgent = userAgents[Math.floor(Math.random() * userAgents.length)];
+
+                    try {
+                        const resp = await fetch(searchUrl, {
+                            headers: {
+                                'User-Agent': randomUserAgent,
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.9',
+                                'Connection': 'keep-alive',
+                                'Upgrade-Insecure-Requests': '1',
+                                'Cache-Control': 'max-age=0',
+                                'sec-ch-ua': '"Chromium";v="123", "Not:A-Brand";v="99"',
+                                'sec-ch-ua-mobile': '?0',
+                                'sec-ch-ua-platform': '"Windows"',
+                                'Sec-Fetch-Dest': 'document',
+                                'Sec-Fetch-Mode': 'navigate',
+                                'Sec-Fetch-Site': 'none',
+                                'Sec-Fetch-User': '?1',
+                            }
+                        });
+
+                        if (!resp.ok) {
+                            try {
+                                const contentType = resp.headers.get('content-type');
+                                if (contentType && contentType.includes('application/json')) {
+                                    console.log(await resp.json());
+                                } else {
+                                    console.log(await resp.text());
+                                }
+                            } catch (e) {
+                                console.error("Error logging response:", e);
+                            }
+                            throw new Error(`Failed to fetch search page: ${resp.status} ${resp.statusText}`);
+                        }
+
+                        const html = await resp.text();
+                        const $ = cheerio.load(html);
+                        const urls: string[] = [];
+                        $('div[data-asin]').each((_, element) => {
+                            const asin = $(element).data('asin');
+                            if (asin) {
+                                urls.push(`https://www.amazon.com/dp/${asin}`);
+                            }
+                        });
+                        return urls;
+                    } catch (error) {
+                        console.error(`Error fetching ${searchUrl}:`, error);
+                        throw error; // Re-throw the error to trigger the retry mechanism
                     }
-
-                    const html = await resp.text();
-                    const $ = cheerio.load(html);
-                    const urls: string[] = [];
-                    $('div[data-asin]').each((_, element) => {
-                        const asin = $(element).data('asin');
-                        if (asin) {
-                            urls.push(`https://www.amazon.com/dp/${asin}`);
-                        }
-                    });
-                    return urls;
                 })
             )
         );
 
         // Flatten the list of product URLs
         const productUrls = productUrlsList.flat();
-
+        console.log('productUrls returned: ', productUrls);
         // Step 2: Extract ASINs from product URLs
         const finalASINs = await step.do(
             'extract all child and parent ASINs from search results',
@@ -85,9 +124,13 @@ export class MyWorkflow extends WorkflowEntrypoint<Env, Params> {
                 }, async () => {
                     const resp = await fetch(`https://www.amazon.com/dp/${asin}`, {
                         headers: {
-                            'User-Agent': 'Mozilla/5.0...',
-                            'Accept': 'text/html,application/xhtml+xml...',
-                            // Other headers
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                            'Accept-Language': 'en-US,en;q=0.9',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                            'Cache-Control': 'max-age=0',
                         }
                     });
 
