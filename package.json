@@ -1,6 +1,7 @@
 {
 	"name": "workflows-starter",
 	"version": "0.0.1",
+	"main": "index.ts",
 	"scripts": {
 		"deploy": "wrangler deploy",
 		"start": "wrangler dev"
